@@ -36,11 +36,26 @@ def get_db():
 def init_db():
     with get_db() as conn:
         with conn.cursor() as cur:
+            # 1. СНАЧАЛА СОЗДАЕМ ТАБЛИЦУ SUBSCRIPTIONS, ЕСЛИ ЕЁ НЕТ
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT UNIQUE NOT NULL,
+                    expires_at TIMESTAMP,
+                    next_remind_at TIMESTAMP,
+                    free_weekly_limit INT DEFAULT 2,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            
+            # 2. ТЕПЕРЬ БЕЗОПАСНО ОБНОВЛЯЕМ (для совместимости)
             cur.execute("""
                 ALTER TABLE subscriptions
                     ADD COLUMN IF NOT EXISTS next_remind_at TIMESTAMP,
                     ADD COLUMN IF NOT EXISTS free_weekly_limit INT DEFAULT 2
             """)
+            
+            # 3. СОЗДАЕМ ТАБЛИЦУ CHAT_USES, ЕСЛИ ЕЁ НЕТ
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chat_uses (
                     id SERIAL PRIMARY KEY,
@@ -48,6 +63,8 @@ def init_db():
                     used_at TIMESTAMP DEFAULT NOW()
                 )
             """)
+            
+            # 4. СОЗДАЕМ ТАБЛИЦУ REFERRALS, ЕСЛИ ЕЁ НЕТ
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS referrals (
                     referrer_id BIGINT NOT NULL,
