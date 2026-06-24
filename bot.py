@@ -11,51 +11,36 @@ from telegram.ext import (Application, CommandHandler, MessageHandler,
                            CallbackQueryHandler, filters, ContextTypes,
                            ConversationHandler, JobQueue)
 from groq import Groq
-
+ 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
 ADMIN_ID       = int(os.environ.get("ADMIN_ID", "0"))
 DATABASE_URL   = os.environ["DATABASE_URL"]
 HF_TOKEN       = os.environ.get("HF_TOKEN", "")
-
+ 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-
+ 
 groq_client = Groq(api_key=GROQ_API_KEY)
-
+ 
 MENU, CHAT, PROPOSAL, BIO, PRICE, IMAGE, IMG_BANNER, IMG_AVATAR, IMG_COVER = range(9)
 TRIAL_DAYS = 1
-
-
+ 
+ 
 # ─── БД ──────────────────────────────────────────────────────
-
+ 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
-
-
+ 
+ 
 def init_db():
     with get_db() as conn:
         with conn.cursor() as cur:
-            # 1. СНАЧАЛА СОЗДАЕМ ТАБЛИЦУ SUBSCRIPTIONS, ЕСЛИ ЕЁ НЕТ
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT UNIQUE NOT NULL,
-                    expires_at TIMESTAMP,
-                    next_remind_at TIMESTAMP,
-                    free_weekly_limit INT DEFAULT 2,
-                    updated_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            # 2. ТЕПЕРЬ БЕЗОПАСНО ОБНОВЛЯЕМ (для совместимости)
             cur.execute("""
                 ALTER TABLE subscriptions
                     ADD COLUMN IF NOT EXISTS next_remind_at TIMESTAMP,
                     ADD COLUMN IF NOT EXISTS free_weekly_limit INT DEFAULT 2
             """)
-            
-            # 3. СОЗДАЕМ ТАБЛИЦУ CHAT_USES, ЕСЛИ ЕЁ НЕТ
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chat_uses (
                     id SERIAL PRIMARY KEY,
@@ -63,8 +48,6 @@ def init_db():
                     used_at TIMESTAMP DEFAULT NOW()
                 )
             """)
-            
-            # 4. СОЗДАЕМ ТАБЛИЦУ REFERRALS, ЕСЛИ ЕЁ НЕТ
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS referrals (
                     referrer_id BIGINT NOT NULL,
@@ -74,28 +57,28 @@ def init_db():
                 )
             """)
         conn.commit()
-
-
+ 
+ 
 def get_subscription_end(user_id: int):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT expires_at FROM subscriptions WHERE user_id = %s", (user_id,))
             row = cur.fetchone()
             return row[0] if row else None
-
-
+ 
+ 
 def is_subscribed(user_id: int) -> bool:
     end = get_subscription_end(user_id)
     return end is not None and datetime.now() < end
-
-
+ 
+ 
 def has_ever_started(user_id: int) -> bool:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM subscriptions WHERE user_id = %s", (user_id,))
             return cur.fetchone() is not None
-
-
+ 
+ 
 def activate_trial(user_id: int):
     expires = datetime.now() + timedelta(days=TRIAL_DAYS)
     limit = random.randint(1, 3)
@@ -110,8 +93,8 @@ def activate_trial(user_id: int):
                         updated_at = NOW()
             """, (user_id, expires, limit))
         conn.commit()
-
-
+ 
+ 
 def activate_paid(user_id: int, days: int = 30):
     current = get_subscription_end(user_id)
     if current and current > datetime.now():
@@ -129,17 +112,17 @@ def activate_paid(user_id: int, days: int = 30):
                         updated_at = NOW()
             """, (user_id, expires))
         conn.commit()
-
-
+ 
+ 
 def days_left(user_id: int) -> int:
     end = get_subscription_end(user_id)
     if not end:
         return 0
     return max(0, (end - datetime.now()).days)
-
-
+ 
+ 
 # ─── Лимит бесплатных вопросов ───────────────────────────────
-
+ 
 def get_free_chat_uses_this_week(user_id: int) -> int:
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -148,31 +131,31 @@ def get_free_chat_uses_this_week(user_id: int) -> int:
                 WHERE user_id = %s AND used_at > NOW() - INTERVAL '7 days'
             """, (user_id,))
             return cur.fetchone()[0]
-
-
+ 
+ 
 def get_free_weekly_limit(user_id: int) -> int:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT free_weekly_limit FROM subscriptions WHERE user_id = %s", (user_id,))
             row = cur.fetchone()
             return row[0] if row and row[0] else 2
-
-
+ 
+ 
 def record_chat_use(user_id: int):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("INSERT INTO chat_uses (user_id) VALUES (%s)", (user_id,))
         conn.commit()
-
-
+ 
+ 
 def can_use_free_chat(user_id: int) -> bool:
     used = get_free_chat_uses_this_week(user_id)
     limit = get_free_weekly_limit(user_id)
     return used < limit
-
-
+ 
+ 
 # ─── Реферальная программа ───────────────────────────────────
-
+ 
 def save_referral(referrer_id: int, referred_id: int):
     if referrer_id == referred_id:
         return
@@ -184,8 +167,8 @@ def save_referral(referrer_id: int, referred_id: int):
                 ON CONFLICT (referred_id) DO NOTHING
             """, (referrer_id, referred_id))
         conn.commit()
-
-
+ 
+ 
 def get_referrer(referred_id: int):
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -195,8 +178,8 @@ def get_referrer(referred_id: int):
             """, (referred_id,))
             row = cur.fetchone()
             return row[0] if row else None
-
-
+ 
+ 
 def mark_referral_bonus_given(referred_id: int):
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -204,8 +187,8 @@ def mark_referral_bonus_given(referred_id: int):
                 UPDATE referrals SET bonus_given = TRUE WHERE referred_id = %s
             """, (referred_id,))
         conn.commit()
-
-
+ 
+ 
 def get_referral_count(referrer_id: int) -> int:
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -213,10 +196,10 @@ def get_referral_count(referrer_id: int) -> int:
                 SELECT COUNT(*) FROM referrals WHERE referrer_id = %s AND bonus_given = TRUE
             """, (referrer_id,))
             return cur.fetchone()[0]
-
-
+ 
+ 
 # ─── Клавиатуры ──────────────────────────────────────────────
-
+ 
 MAIN_KEYBOARD = [
     ["📨 Написать предложение клиенту", "👤 Составить биографию"],
     ["💰 Обосновать цену",              "🔔 Follow-up клиенту"],
@@ -224,27 +207,27 @@ MAIN_KEYBOARD = [
     ["🎨 Генерация картинок",           "💳 Моя подписка"],
     ["🔗 Пригласить друга"],
 ]
-
+ 
 FREE_KEYBOARD = [
     ["💬 Задать вопрос",    "📚 Советы новичку"],
     ["💳 Моя подписка",    "🔗 Пригласить друга"],
 ]
-
-
+ 
+ 
 def main_menu_keyboard():
     return ReplyKeyboardMarkup(MAIN_KEYBOARD, resize_keyboard=True)
-
-
+ 
+ 
 def free_menu_keyboard():
     return ReplyKeyboardMarkup(FREE_KEYBOARD, resize_keyboard=True)
-
-
+ 
+ 
 def get_keyboard(user_id: int):
     return main_menu_keyboard() if is_subscribed(user_id) else free_menu_keyboard()
-
-
+ 
+ 
 # ─── Проверка подписки ───────────────────────────────────────
-
+ 
 async def check_sub(update: Update) -> bool:
     uid = update.effective_user.id
     if is_subscribed(uid):
@@ -263,15 +246,15 @@ async def check_sub(update: Update) -> bool:
         parse_mode="HTML"
     )
     return False
-
-
+ 
+ 
 # ─── /start ──────────────────────────────────────────────────
-
+ 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     name = update.effective_user.first_name
     username = update.effective_user.username
-
+ 
     # Обработка реферальной ссылки
     if ctx.args and ctx.args[0].startswith("ref_"):
         try:
@@ -280,7 +263,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 save_referral(referrer_id, uid)
         except ValueError:
             pass
-
+ 
     if not has_ever_started(uid):
         activate_trial(uid)
         await update.message.reply_text(
@@ -320,19 +303,19 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=free_menu_keyboard()
         )
     return MENU
-
-
+ 
+ 
 # ─── Напоминания (JobQueue) ───────────────────────────────────
-
+ 
 REMINDER_TEXTS = [
     "👋 Привет! Напоминаю — твой пробный период закончился.\n\n"
     "Оформи подписку за <b>299 руб/мес</b> и получи полный доступ к AI-помощнику.\n"
     "👉 /pay\n\nИли пригласи друга и получи <b>7 дней бесплатно</b>: /ref",
-
+ 
     "💡 Знаешь ли ты, что подписчики зарабатывают на фрилансе на 40% больше, "
     "потому что умеют правильно подавать себя?\n\n"
     "Попробуй полный доступ за <b>299 руб/мес</b> 👉 /pay",
-
+ 
     "🔓 Разблокируй полный функционал:\n"
     "📨 Предложения клиентам\n"
     "👤 Создание биографии\n"
@@ -340,8 +323,8 @@ REMINDER_TEXTS = [
     "🔔 Follow-up письма\n\n"
     "Всего <b>299 руб/мес</b> 👉 /pay\n\nИли позови друга и получи неделю бесплатно: /ref",
 ]
-
-
+ 
+ 
 async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
     try:
         with get_db() as conn:
@@ -352,7 +335,7 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
                       AND (next_remind_at IS NULL OR next_remind_at <= NOW())
                 """)
                 users = [row[0] for row in cur.fetchall()]
-
+ 
         for uid in users:
             if uid == ADMIN_ID:
                 continue
@@ -371,19 +354,19 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
                 logger.warning(f"Не удалось отправить напоминание {uid}: {e}")
     except Exception as e:
         logger.error(f"Ошибка в send_reminders: {e}")
-
-
+ 
+ 
 # ─── Уведомление админа ──────────────────────────────────────
-
+ 
 async def notify_admin(ctx: ContextTypes.DEFAULT_TYPE, text: str):
     try:
         await ctx.bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Admin notify error: {e}")
-
-
+ 
+ 
 # ─── Подписка ────────────────────────────────────────────────
-
+ 
 async def subscription_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     end = get_subscription_end(uid)
@@ -409,24 +392,28 @@ async def subscription_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
     return MENU
-
-
+ 
+ 
 async def pay_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💳 <b>Оплата подписки</b>\n\n"
-        "Стоимость: <b>299 руб/месяц</b>\n\n"
-        "Для оплаты переведи на карту:\n"
-        "<code>2204 3203 4067 9713</code>\n"
-        "Банк: Озонбанк\n\n"
-        "После оплаты отправь скриншот чека сюда — активирую вручную в течение 15 минут.\n\n"
+        "Стоимость: <b>299 руб/месяц</b> (≈ 3.3 USDT)\n\n"
+        "Оплата через <b>@CryptoBot</b> в Telegram:\n\n"
+        "1️⃣ Открой @CryptoBot\n"
+        "2️⃣ Нажми «Перевести» (Send)\n"
+        "3️⃣ Введи ID получателя:\n"
+        "<code>7394479104</code>\n"
+        "4️⃣ Укажи сумму: <b>3.3 USDT</b> (или эквивалент в любой валюте бота)\n"
+        "5️⃣ Подтверди перевод\n\n"
+        "После оплаты отправь сюда скриншот чека — активирую подписку в течение 15 минут.\n\n"
         "По вопросам: @sitis_1",
         parse_mode="HTML"
     )
     return MENU
-
-
+ 
+ 
 # ─── Реферальная программа ───────────────────────────────────
-
+ 
 async def referral_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     bot_username = (await ctx.bot.get_me()).username
@@ -441,10 +428,10 @@ async def referral_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
     return MENU
-
-
+ 
+ 
 # ─── Админ команды ───────────────────────────────────────────
-
+ 
 async def admin_activate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Нет доступа")
@@ -476,8 +463,8 @@ async def admin_activate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🔗 Реферер {referrer_id} получил +7 дней бонуса!")
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}\nИспользование: /activate user_id дней")
-
-
+ 
+ 
 async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -493,8 +480,8 @@ async def admin_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         status = "✅" if datetime.now() < end else "❌"
         text += f"{status} <code>{uid}</code> — до {end.strftime('%d.%m.%Y')}\n"
     await update.message.reply_text(text, parse_mode="HTML")
-
-
+ 
+ 
 async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("❌ Нет доступа")
@@ -517,10 +504,10 @@ async def admin_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🔗 Реферальных оплат: <b>{ref_paid}</b>",
         parse_mode="HTML"
     )
-
-
+ 
+ 
 # ─── AI ──────────────────────────────────────────────────────
-
+ 
 SYSTEM_PROMPT = (
     "Ты — дружелюбный AI-помощник для начинающих фрилансеров. "
     "Отвечаешь кратко, по делу, на русском языке. "
@@ -528,8 +515,8 @@ SYSTEM_PROMPT = (
     "работой на биржах (Upwork, Fiverr, Kwork). "
     "Помни контекст разговора и ссылайся на предыдущие ответы если это уместно."
 )
-
-
+ 
+ 
 async def ask_ai(prompt: str, history: list[dict] | None = None) -> str:
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -546,20 +533,20 @@ async def ask_ai(prompt: str, history: list[dict] | None = None) -> str:
     except Exception as e:
         logger.error(f"Groq error: {e}")
         return f"Ошибка AI: {e}"
-
-
+ 
+ 
 # ─── Советы ──────────────────────────────────────────────────
-
+ 
 # ─── История чата (в памяти, сессионная) ─────────────────────
 # Формат: {user_id: [{"role": "user"/"assistant", "content": "..."}]}
 chat_history: dict[int, list[dict]] = {}
 MAX_HISTORY = 10  # максимум сообщений в истории (5 диалогов)
-
-
+ 
+ 
 def get_history(user_id: int) -> list[dict]:
     return chat_history.get(user_id, [])
-
-
+ 
+ 
 def add_to_history(user_id: int, role: str, content: str):
     if user_id not in chat_history:
         chat_history[user_id] = []
@@ -567,12 +554,12 @@ def add_to_history(user_id: int, role: str, content: str):
     # Обрезаем до MAX_HISTORY сообщений
     if len(chat_history[user_id]) > MAX_HISTORY:
         chat_history[user_id] = chat_history[user_id][-MAX_HISTORY:]
-
-
+ 
+ 
 def clear_history(user_id: int):
     chat_history.pop(user_id, None)
-
-
+ 
+ 
 TIPS = [
     "🎯 <b>Выбери нишу</b>\nСпециализация = выше ставка и меньше конкуренция.",
     "📁 <b>Портфолио важнее всего</b>\nСделай 3–5 учебных проектов прежде чем брать первый заказ.",
@@ -584,8 +571,8 @@ TIPS = [
     "🚫 <b>Не бойся отказывать</b>\nПлохой клиент забирает время у хорошего.",
 ]
 tip_index = {}
-
-
+ 
+ 
 async def show_tip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     i = tip_index.get(uid, 0)
@@ -593,8 +580,8 @@ async def show_tip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Следующий совет ➡️", callback_data="next_tip")]])
     await update.message.reply_text(TIPS[i], parse_mode="HTML", reply_markup=kb)
     return MENU
-
-
+ 
+ 
 async def next_tip_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -603,10 +590,10 @@ async def next_tip_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     tip_index[uid] = (i + 1) % len(TIPS)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Следующий совет ➡️", callback_data="next_tip")]])
     await query.edit_message_text(TIPS[i], parse_mode="HTML", reply_markup=kb)
-
-
+ 
+ 
 # ─── Хэндлеры (только для подписчиков) ──────────────────────
-
+ 
 async def proposal_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await check_sub(update): return MENU
     await update.message.reply_text(
@@ -615,8 +602,8 @@ async def proposal_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
     return PROPOSAL
-
-
+ 
+ 
 async def proposal_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Генерирую предложение...")
     result = await ask_ai(
@@ -627,8 +614,8 @@ async def proposal_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📨 <b>Готово!</b>\n\n{result}", parse_mode="HTML",
                                     reply_markup=main_menu_keyboard())
     return MENU
-
-
+ 
+ 
 async def bio_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await check_sub(update): return MENU
     await update.message.reply_text(
@@ -637,8 +624,8 @@ async def bio_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
     return BIO
-
-
+ 
+ 
 async def bio_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Составляю биографию...")
     result = await ask_ai(
@@ -649,8 +636,8 @@ async def bio_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"👤 <b>Готово!</b>\n\n{result}", parse_mode="HTML",
                                     reply_markup=main_menu_keyboard())
     return MENU
-
-
+ 
+ 
 async def price_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await check_sub(update): return MENU
     await update.message.reply_text(
@@ -659,8 +646,8 @@ async def price_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
     return PRICE
-
-
+ 
+ 
 async def price_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Составляю обоснование...")
     result = await ask_ai(
@@ -671,8 +658,8 @@ async def price_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💰 <b>Готово!</b>\n\n{result}", parse_mode="HTML",
                                     reply_markup=main_menu_keyboard())
     return MENU
-
-
+ 
+ 
 async def followup_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await check_sub(update): return MENU
     await update.message.reply_text("⏳ Пишу follow-up...")
@@ -683,10 +670,10 @@ async def followup_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔔 <b>Готово!</b>\n\n{result}", parse_mode="HTML",
                                     reply_markup=main_menu_keyboard())
     return MENU
-
-
+ 
+ 
 # ─── Чат (с лимитом для бесплатных) ─────────────────────────
-
+ 
 async def chat_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if is_subscribed(uid):
@@ -719,19 +706,19 @@ async def chat_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
         return MENU
-
-
+ 
+ 
 async def clear_chat_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     clear_history(uid)
     await update.message.reply_text("🗑 История чата очищена. Начинаем заново!")
     return CHAT
-
-
+ 
+ 
 async def chat_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     user_text = update.message.text
-
+ 
     if not is_subscribed(uid):
         if not can_use_free_chat(uid):
             limit = get_free_weekly_limit(uid)
@@ -755,7 +742,7 @@ async def chat_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             extra = "\n\n<i>Это был последний бесплатный вопрос на этой неделе. Оформи подписку: /pay</i>"
         await update.message.reply_text(result + extra, parse_mode="HTML")
         return CHAT
-
+ 
     # Платный режим — с историей
     history = get_history(uid)
     await update.message.chat.send_action("typing")
@@ -766,12 +753,12 @@ async def chat_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     footer = f"\n\n<i>💬 {history_len} сообщ. в памяти  |  /clearchat — очистить</i>"
     await update.message.reply_text(result + footer, parse_mode="HTML")
     return CHAT
-
-
+ 
+ 
 # ─── Генерация картинок ──────────────────────────────────────
-
+ 
 # ─── Общая функция генерации через HF ───────────────────────
-
+ 
 async def hf_generate(prompt: str) -> bytes | None:
     try:
         hf_url = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
@@ -787,8 +774,8 @@ async def hf_generate(prompt: str) -> bytes | None:
     except Exception as e:
         logger.error(f"HF generate error: {e}")
         return None
-
-
+ 
+ 
 IMG_TYPE_KEYBOARD = [
     ["🖼 Баннер для портфолио"],
     ["👤 Аватарка для Upwork/Fiverr"],
@@ -796,11 +783,11 @@ IMG_TYPE_KEYBOARD = [
     ["✏️ Свой запрос"],
     ["🔙 Назад в меню"],
 ]
-
+ 
 def img_type_keyboard():
     return ReplyKeyboardMarkup(IMG_TYPE_KEYBOARD, resize_keyboard=True)
-
-
+ 
+ 
 async def image_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await check_sub(update): return MENU
     await update.message.reply_text(
@@ -809,11 +796,11 @@ async def image_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=img_type_keyboard()
     )
     return IMAGE
-
-
+ 
+ 
 async def image_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-
+ 
     # Роутер по типу картинки
     if "баннер" in text.lower():
         return await img_banner_start(update, ctx)
@@ -823,7 +810,7 @@ async def image_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await img_cover_start(update, ctx)
     if "назад" in text.lower():
         return await back_to_menu(update, ctx)
-
+ 
     # Свой запрос — генерируем напрямую
     prompt = text
     msg = await update.message.reply_text("🎨 Генерирую картинку, подожди 20–40 секунд...")
@@ -842,10 +829,10 @@ async def image_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "/menu — вернуться в меню"
         )
     return MENU
-
-
+ 
+ 
 # ─── Баннер для портфолио ────────────────────────────────────
-
+ 
 async def img_banner_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🖼 <b>Баннер для портфолио</b>\n\n"
@@ -854,8 +841,8 @@ async def img_banner_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
     return IMG_BANNER
-
-
+ 
+ 
 async def img_banner_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     desc = update.message.text.strip()
     msg = await update.message.reply_text("🖼 Генерирую баннер, подожди 20–40 секунд...")
@@ -872,10 +859,10 @@ async def img_banner_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.edit_text("❌ Ошибка генерации. Попробуй изменить описание.\n/menu — в меню")
     return MENU
-
-
+ 
+ 
 # ─── Аватарка ────────────────────────────────────────────────
-
+ 
 async def img_avatar_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👤 <b>Аватарка для Upwork/Fiverr</b>\n\n"
@@ -884,8 +871,8 @@ async def img_avatar_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
     return IMG_AVATAR
-
-
+ 
+ 
 async def img_avatar_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     desc = update.message.text.strip()
     msg = await update.message.reply_text("👤 Генерирую аватарку, подожди 20–40 секунд...")
@@ -902,10 +889,10 @@ async def img_avatar_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.edit_text("❌ Ошибка генерации. Попробуй изменить описание.\n/menu — в меню")
     return MENU
-
-
+ 
+ 
 # ─── Обложка для соцсетей ────────────────────────────────────
-
+ 
 async def img_cover_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📰 <b>Обложка для соцсетей</b>\n\n"
@@ -914,8 +901,8 @@ async def img_cover_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
     return IMG_COVER
-
-
+ 
+ 
 async def img_cover_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     desc = update.message.text.strip()
     msg = await update.message.reply_text("📰 Генерирую обложку, подожди 20–40 секунд...")
@@ -932,10 +919,10 @@ async def img_cover_generate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.edit_text("❌ Ошибка генерации. Попробуй изменить описание.\n/menu — в меню")
     return MENU
-
-
+ 
+ 
 # ─── Скриншот оплаты ─────────────────────────────────────────
-
+ 
 async def payment_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     name = update.effective_user.first_name
@@ -964,22 +951,22 @@ async def payment_screenshot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Payment notify error: {e}")
     return MENU
-
-
+ 
+ 
 # ─── Прочие хэндлеры ─────────────────────────────────────────
-
+ 
 async def back_to_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     clear_history(uid)
     await update.message.reply_text("Главное меню 👇", reply_markup=get_keyboard(uid))
     return MENU
-
-
+ 
+ 
 async def menu_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     uid = update.effective_user.id
     subscribed = is_subscribed(uid)
-
+ 
     if "предложение" in text.lower():
         return await proposal_start(update, ctx)
     if "биографию" in text.lower():
@@ -998,11 +985,11 @@ async def menu_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await referral_cmd(update, ctx)
     if "картинк" in text.lower() or "генерац" in text.lower():
         return await image_start(update, ctx)
-
+ 
     await update.message.reply_text("Выбери действие из меню 👇", reply_markup=get_keyboard(uid))
     return MENU
-
-
+ 
+ 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     await update.message.reply_text(
@@ -1017,15 +1004,15 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_keyboard(uid)
     )
     return MENU
-
-
+ 
+ 
 # ─── main ─────────────────────────────────────────────────────
-
+ 
 def main():
     init_db()
-
+ 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
+ 
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -1046,7 +1033,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start), CommandHandler("menu", back_to_menu)],
     )
-
+ 
     app.add_handler(conv)
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("pay", pay_info))
@@ -1056,13 +1043,13 @@ def main():
     app.add_handler(CommandHandler("stats", admin_stats))
     app.add_handler(CallbackQueryHandler(next_tip_callback, pattern="^next_tip$"))
     app.add_handler(MessageHandler(filters.PHOTO, payment_screenshot))
-
+ 
     # Напоминания каждые 30 минут (реальная отправка через 5-12 ч по логике)
     app.job_queue.run_repeating(send_reminders, interval=1800, first=60)
-
+ 
     logger.info("Бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
