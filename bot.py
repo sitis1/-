@@ -1207,7 +1207,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()import os
+    main() 
+  import os
 import random
 import logging
 import httpx
