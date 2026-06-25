@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 MENU, CHAT, PROPOSAL, BIO, PRICE, IMAGE = range(6)
+BASE_PRICE_RUB = 200
+BASE_PRICE_USDT = 2.2
 TRIAL_DAYS = 1
 
 
@@ -56,7 +58,85 @@ def init_db():
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS promo_codes (
+                    code VARCHAR(50) PRIMARY KEY,
+                    discount INT NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS promo_uses (
+                    user_id BIGINT NOT NULL,
+                    code VARCHAR(50) NOT NULL,
+                    used_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (user_id, code)
+                )
+            """)
         conn.commit()
+
+
+def get_promo_discount(code: str):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT discount FROM promo_codes WHERE code = %s", (code.strip().upper(),))
+            row = cur.fetchone()
+            return row[0] if row else None
+
+
+def add_promo_code(code: str, discount: int):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO promo_codes (code, discount, created_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (code) DO UPDATE SET discount = EXCLUDED.discount
+            """, (code.strip().upper(), discount))
+        conn.commit()
+
+
+def delete_promo_code(code: str):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM promo_codes WHERE code = %s", (code.strip().upper(),))
+        conn.commit()
+
+
+def list_promo_codes():
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT code, discount FROM promo_codes ORDER BY created_at DESC")
+            return cur.fetchall()
+
+
+def has_used_promo(user_id: int, code: str) -> bool:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM promo_uses WHERE user_id = %s AND code = %s",
+                (user_id, code.strip().upper())
+            )
+            return cur.fetchone() is not None
+
+
+def mark_promo_used(user_id: int, code: str):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO promo_uses (user_id, code) VALUES (%s, %s)
+                ON CONFLICT (user_id, code) DO NOTHING
+            """, (user_id, code.strip().upper()))
+        conn.commit()
+
+
+def calc_price_with_promo(code: str = None):
+    if code:
+        discount = get_promo_discount(code)
+        if discount:
+            price_rub = round(BASE_PRICE_RUB * (1 - discount / 100))
+            price_usdt = round(BASE_PRICE_USDT * (1 - discount / 100), 2)
+            return price_rub, price_usdt, discount
+    return BASE_PRICE_RUB, BASE_PRICE_USDT, 0
 
 
 def get_subscription_end(user_id: int):
@@ -240,7 +320,7 @@ async def check_sub(update: Update) -> bool:
         return True
     await update.message.reply_text(
         "🔒 <b>Эта функция доступна только по подписке.</b>\n\n"
-        "Стоимость: <b>299 руб/месяц</b>\n"
+        "Стоимость: <b>200 руб/месяц</b>\n"
         "Напиши /pay для оплаты\n\n"
         "Или пригласи друга — получишь <b>7 дней бесплатно</b>! /ref",
         parse_mode="HTML"
@@ -272,7 +352,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Я — AI-помощник для фрилансеров. Помогу писать предложения клиентам, "
             "составлять профиль, обосновывать цену и отвечать на вопросы по фрилансу.\n\n"
             "📢 Подписывайся на наш канал: @freelanceburmalda\n\n"
-            "После пробного периода подписка стоит <b>299 руб/месяц</b>.\n\n"
+            "После пробного периода подписка стоит <b>200 руб/месяц</b>.\n\n"
             "Выбери что тебе нужно 👇",
             parse_mode="HTML",
             reply_markup=main_menu_keyboard()
@@ -297,7 +377,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "В <b>бесплатной версии</b> доступно:\n"
             "• 💬 Вопросы по фрилансу (лимит в неделю)\n"
             "• 📚 Советы\n\n"
-            "Оформи подписку за <b>299 руб/мес</b> — получишь полный доступ.\n"
+            "Оформи подписку за <b>200 руб/мес</b> — получишь полный доступ.\n"
             "Напиши /pay или пригласи друга /ref 🎁",
             parse_mode="HTML",
             reply_markup=free_menu_keyboard()
@@ -309,19 +389,19 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 REMINDER_TEXTS = [
     "👋 Привет! Напоминаю — твой пробный период закончился.\n\n"
-    "Оформи подписку за <b>299 руб/мес</b> и получи полный доступ к AI-помощнику.\n"
+    "Оформи подписку за <b>200 руб/мес</b> и получи полный доступ к AI-помощнику.\n"
     "👉 /pay\n\nИли пригласи друга и получи <b>7 дней бесплатно</b>: /ref",
 
     "💡 Знаешь ли ты, что подписчики зарабатывают на фрилансе на 40% больше, "
     "потому что умеют правильно подавать себя?\n\n"
-    "Попробуй полный доступ за <b>299 руб/мес</b> 👉 /pay",
+    "Попробуй полный доступ за <b>200 руб/мес</b> 👉 /pay",
 
     "🔓 Разблокируй полный функционал:\n"
     "📨 Предложения клиентам\n"
     "👤 Создание биографии\n"
     "💰 Обоснование цены\n"
     "🔔 Follow-up письма\n\n"
-    "Всего <b>299 руб/мес</b> 👉 /pay\n\nИли позови друга и получи неделю бесплатно: /ref",
+    "Всего <b>200 руб/мес</b> 👉 /pay\n\nИли позови друга и получи неделю бесплатно: /ref",
 ]
 
 
@@ -386,7 +466,7 @@ async def subscription_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "💳 <b>Подписка</b>\n\n"
             "❌ Нет активной подписки\n\n"
             f"💬 Бесплатных вопросов на этой неделе: <b>{used}/{limit}</b>\n\n"
-            "Стоимость полного доступа: <b>299 руб/месяц</b>\n"
+            "Стоимость полного доступа: <b>200 руб/месяц</b>\n"
             "Напиши /pay для оплаты\n\n"
             "Или пригласи друга и получи <b>7 дней бесплатно</b>! /ref",
             parse_mode="HTML"
@@ -395,17 +475,96 @@ async def subscription_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def pay_info(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    code = ctx.args[0] if ctx.args else None
+
+    if code:
+        discount = get_promo_discount(code)
+        if not discount:
+            await update.message.reply_text(
+                "❌ Промокод не найден или недействителен.\n\nПопробуй другой или напиши /pay без кода."
+            )
+            return MENU
+        if has_used_promo(uid, code):
+            await update.message.reply_text(
+                "⛔ Этот промокод уже был использован в этом чате.\n\n"
+                "Каждый промокод одноразовый. Напиши /pay без кода для оплаты по полной цене."
+            )
+            return MENU
+        mark_promo_used(uid, code)
+        price_rub, price_usdt, discount = calc_price_with_promo(code)
+    else:
+        price_rub, price_usdt, discount = BASE_PRICE_RUB, BASE_PRICE_USDT, 0
+
+    discount_line = f"🎁 Промокод применён: скидка <b>{discount}%</b>\n\n" if discount else ""
+
     await update.message.reply_text(
-        "💳 <b>Оплата подписки</b>\n\n"
-        "Стоимость: <b>299 руб/месяц</b>\n\n"
-        "Для оплаты переведи на карту:\n"
-        "<code>2204 3203 4067 9713</code>\n"
-        "Банк: Озонбанк\n\n"
-        "После оплаты отправь скриншот чека сюда — активирую вручную в течение 15 минут.\n\n"
+        f"💳 <b>Оплата подписки</b>\n\n"
+        f"{discount_line}"
+        f"Стоимость: <b>{price_rub} руб/месяц</b> (≈ {price_usdt} USDT)\n\n"
+        "Оплата через <b>@CryptoBot</b> в Telegram:\n\n"
+        "1️⃣ Открой @CryptoBot\n"
+        "2️⃣ Нажми «Перевести» (Send)\n"
+        "3️⃣ Введи ID получателя:\n"
+        "<code>7394479104</code>\n"
+        f"4️⃣ Укажи сумму: <b>{price_usdt} USDT</b>\n"
+        "5️⃣ Подтверди перевод\n\n"
+        "После оплаты отправь сюда скриншот чека"
+        f"{' и укажи промокод ' + code.upper() if code else ''} — активирую подписку в течение 15 минут.\n\n"
         "По вопросам: @sitis_1",
         parse_mode="HTML"
     )
     return MENU
+
+
+# ─── Админ: управление промокодами ───────────────────────────
+
+async def admin_addpromo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа")
+        return
+    try:
+        code = ctx.args[0]
+        discount = int(ctx.args[1])
+        if not (1 <= discount <= 99):
+            await update.message.reply_text("Скидка должна быть от 1 до 99%")
+            return
+        add_promo_code(code, discount)
+        await update.message.reply_text(
+            f"✅ Промокод <b>{code.upper()}</b> создан со скидкой <b>{discount}%</b>\n\n"
+            f"Пользователь активирует его командой:\n<code>/pay {code.upper()}</code>",
+            parse_mode="HTML"
+        )
+    except (IndexError, ValueError):
+        await update.message.reply_text(
+            "Формат: /addpromo КОД скидка\n\nПример: /addpromo FRIEND10 10"
+        )
+
+
+async def admin_delpromo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа")
+        return
+    try:
+        code = ctx.args[0]
+        delete_promo_code(code)
+        await update.message.reply_text(f"🗑 Промокод {code.upper()} удалён")
+    except IndexError:
+        await update.message.reply_text("Формат: /delpromo КОД")
+
+
+async def admin_listpromo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа")
+        return
+    codes = list_promo_codes()
+    if not codes:
+        await update.message.reply_text("Промокодов пока нет.\n\nСоздать: /addpromo КОД скидка")
+        return
+    text = "🎁 <b>Активные промокоды:</b>\n\n"
+    for code, discount in codes:
+        text += f"<code>{code}</code> — {discount}%\n"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 
 # ─── Реферальная программа ───────────────────────────────────
@@ -697,7 +856,7 @@ async def chat_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"⛔ Ты использовал все {limit} бесплатных вопроса на этой неделе.\n\n"
             "Лимит сбросится через 7 дней.\n\n"
-            "🔓 Оформи подписку за <b>299 руб/мес</b> — задавай вопросы без ограничений!\n"
+            "🔓 Оформи подписку за <b>200 руб/мес</b> — задавай вопросы без ограничений!\n"
             "👉 /pay\n\nИли пригласи друга и получи <b>7 дней бесплатно</b>: /ref",
             parse_mode="HTML"
         )
@@ -913,6 +1072,9 @@ def main():
     app.add_handler(conv)
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("pay", pay_info))
+    app.add_handler(CommandHandler("addpromo", admin_addpromo))
+    app.add_handler(CommandHandler("delpromo", admin_delpromo))
+    app.add_handler(CommandHandler("listpromo", admin_listpromo))
     app.add_handler(CommandHandler("ref", referral_cmd))
     app.add_handler(CommandHandler("activate", admin_activate))
     app.add_handler(CommandHandler("users", admin_users))
